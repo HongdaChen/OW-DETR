@@ -1,10 +1,10 @@
 # ------------------------------------------------------------------------
-# Deformable DETR
-# Copyright (c) 2020 SenseTime. All Rights Reserved.
-# Licensed under the Apache License, Version 2.0 [see LICENSE for details]
+# OW-DETR: Open-world Detection Transformer
+# Akshita Gupta^, Sanath Narayan^, K J Joseph, Salman Khan, Fahad Shahbaz Khan, Mubarak Shah
+# https://arxiv.org/pdf/2112.01513.pdf
 # ------------------------------------------------------------------------
-# Modified from DETR (https://github.com/facebookresearch/detr)
-# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
+# Modified from Deformable DETR (https://github.com/fundamentalvision/Deformable-DETR)
+# Copyright (c) 2020 SenseTime. All Rights Reserved.
 # ------------------------------------------------------------------------
 
 """
@@ -14,19 +14,21 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 import math
-
+import pickle
 from util import box_ops
 from util.misc import (NestedTensor, nested_tensor_from_tensor_list,
                        accuracy, get_world_size, interpolate,
                        is_dist_avail_and_initialized, inverse_sigmoid)
-
 from .backbone import build_backbone
 from .matcher import build_matcher
 from .segmentation import (DETRsegm, PostProcessPanoptic, PostProcessSegm,
-                           dice_loss, sigmoid_focal_loss)
+                           dice_loss, sigmoid_focal_loss) #, sigmoid_focal_loss_CA)
 from .deformable_transformer import build_deforamble_transformer
 import copy
-
+import heapq
+import operator
+import os
+from copy import deepcopy
 
 def _get_clones(module, N):
     return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
@@ -35,7 +37,8 @@ def _get_clones(module, N):
 class DeformableDETR(nn.Module):
     """ This is the Deformable DETR module that performs object detection """
     def __init__(self, backbone, transformer, num_classes, num_queries, num_feature_levels,
-                 aux_loss=True, with_box_refine=False, two_stage=False):
+                 aux_loss=True, with_box_refine=False, two_stage=False, 
+                 unmatched_boxes=False, novelty_cls=False, featdim=1024):
         """ Initializes the model.
         Parameters:
             backbone: torch module of the backbone to be used. See backbone.py
@@ -48,12 +51,22 @@ class DeformableDETR(nn.Module):
             two_stage: two-stage Deformable DETR
         """
         super().__init__()
+
         self.num_queries = num_queries
         self.transformer = transformer
         hidden_dim = transformer.d_model
+
         self.class_embed = nn.Linear(hidden_dim, num_classes)
         self.bbox_embed = MLP(hidden_dim, hidden_dim, 4, 3)
         self.num_feature_levels = num_feature_levels
+        
+        ###
+        self.featdim = featdim
+        self.unmatched_boxes = unmatched_boxes
+        self.novelty_cls = novelty_cls
+        if self.novelty_cls:
+            self.nc_class_embed = nn.Linear(hidden_dim, 1)
+
         if not two_stage:
             self.query_embed = nn.Embedding(num_queries, hidden_dim*2)
         if num_feature_levels > 1:
@@ -86,6 +99,8 @@ class DeformableDETR(nn.Module):
         prior_prob = 0.01
         bias_value = -math.log((1 - prior_prob) / prior_prob)
         self.class_embed.bias.data = torch.ones(num_classes) * bias_value
+        if self.novelty_cls:
+            self.nc_class_embed.bias.data = torch.ones(1) * bias_value
         nn.init.constant_(self.bbox_embed.layers[-1].weight.data, 0)
         nn.init.constant_(self.bbox_embed.layers[-1].bias.data, 0)
         for proj in self.input_proj:
@@ -103,6 +118,10 @@ class DeformableDETR(nn.Module):
         else:
             nn.init.constant_(self.bbox_embed.layers[-1].bias.data[2:], -2.0)
             self.class_embed = nn.ModuleList([self.class_embed for _ in range(num_pred)])
+
+            if self.novelty_cls:
+                self.nc_class_embed = nn.ModuleList([self.nc_class_embed for _ in range(num_pred)])
+
             self.bbox_embed = nn.ModuleList([self.bbox_embed for _ in range(num_pred)])
             self.transformer.decoder.bbox_embed = None
         if two_stage:
@@ -112,10 +131,9 @@ class DeformableDETR(nn.Module):
                 nn.init.constant_(box_embed.layers[-1].bias.data[2:], 0.0)
 
     def forward(self, samples: NestedTensor):
-        """ The forward expects a NestedTensor, which consists of:
+        """ The forward expects a NestedTensor, which consists of:
                - samples.tensor: batched images, of shape [batch_size x 3 x H x W]
                - samples.mask: a binary mask of shape [batch_size x H x W], containing 1 on padded pixels
-
             It returns a dict with the following elements:
                - "pred_logits": the classification logits (including no-object) for all queries.
                                 Shape= [batch_size x num_queries x (num_classes + 1)]
@@ -132,8 +150,21 @@ class DeformableDETR(nn.Module):
 
         srcs = []
         masks = []
+        if self.featdim == 512:
+            dim_index = 0
+        elif self.featdim == 1024:
+            dim_index = 1
+        else:
+            dim_index = 2
+
         for l, feat in enumerate(features):
             src, mask = feat.decompose()
+            ## [Info] extracting the resnet features which are used for selecting unmatched queries
+            if self.unmatched_boxes:
+                if l == dim_index:
+                    resnet_1024_feature = src.clone() # 2X1024X61X67 
+            else:
+                resnet_1024_feature = None
             srcs.append(self.input_proj[l](src))
             masks.append(mask)
             assert mask is not None
@@ -154,17 +185,26 @@ class DeformableDETR(nn.Module):
         query_embeds = None
         if not self.two_stage:
             query_embeds = self.query_embed.weight
+        
         hs, init_reference, inter_references, enc_outputs_class, enc_outputs_coord_unact = self.transformer(srcs, masks, pos, query_embeds)
-
+   
         outputs_classes = []
         outputs_coords = []
+        outputs_classes_nc = []
+
         for lvl in range(hs.shape[0]):
             if lvl == 0:
                 reference = init_reference
             else:
                 reference = inter_references[lvl - 1]
+            
             reference = inverse_sigmoid(reference)
             outputs_class = self.class_embed[lvl](hs[lvl])
+
+            ## novelty classification
+            if self.novelty_cls:
+                outputs_class_nc = self.nc_class_embed[lvl](hs[lvl])
+
             tmp = self.bbox_embed[lvl](hs[lvl])
             if reference.shape[-1] == 4:
                 tmp += reference
@@ -173,26 +213,44 @@ class DeformableDETR(nn.Module):
                 tmp[..., :2] += reference
             outputs_coord = tmp.sigmoid()
             outputs_classes.append(outputs_class)
+            if self.novelty_cls:
+                outputs_classes_nc.append(outputs_class_nc)
             outputs_coords.append(outputs_coord)
+
         outputs_class = torch.stack(outputs_classes)
         outputs_coord = torch.stack(outputs_coords)
 
-        out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1]}
-        if self.aux_loss:
-            out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord)
+        if self.novelty_cls:
+            output_class_nc = torch.stack(outputs_classes_nc)
+            
+        out = {'pred_logits': outputs_class[-1], 'pred_boxes': outputs_coord[-1], 'resnet_1024_feat': resnet_1024_feature}
 
+        if self.novelty_cls:
+            out = {'pred_logits': outputs_class[-1], 'pred_nc_logits': output_class_nc[-1], 'pred_boxes': outputs_coord[-1], 'resnet_1024_feat': resnet_1024_feature}
+
+        if self.aux_loss:
+            out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord, output_class_nc=None)
+            if self.novelty_cls:
+                out['aux_outputs'] = self._set_aux_loss(outputs_class, outputs_coord, output_class_nc=output_class_nc)
         if self.two_stage:
             enc_outputs_coord = enc_outputs_coord_unact.sigmoid()
             out['enc_outputs'] = {'pred_logits': enc_outputs_class, 'pred_boxes': enc_outputs_coord}
+
         return out
 
     @torch.jit.unused
-    def _set_aux_loss(self, outputs_class, outputs_coord):
+    def _set_aux_loss(self, outputs_class, outputs_coord, output_class_nc=None):
         # this is a workaround to make torchscript happy, as torchscript
         # doesn't support dictionary with non-homogeneous values, such
         # as a dict having both a Tensor and a list.
-        return [{'pred_logits': a, 'pred_boxes': b}
+        # import pdb;pdb.set_trace()
+        if output_class_nc is not None:
+            xx = [{'pred_logits': a, 'pred_nc_logits': c, 'pred_boxes': b}
+                for a, c, b in zip(outputs_class[:-1], output_class_nc[:-1], outputs_coord[:-1])]
+        else:
+            xx = [{'pred_logits': a, 'pred_boxes': b}
                 for a, b in zip(outputs_class[:-1], outputs_coord[:-1])]
+        return xx
 
 
 class SetCriterion(nn.Module):
@@ -201,7 +259,7 @@ class SetCriterion(nn.Module):
         1) we compute hungarian assignment between ground truth boxes and the outputs of the model
         2) we supervise each pair of matched ground-truth / prediction (supervise class and box)
     """
-    def __init__(self, num_classes, matcher, weight_dict, losses, focal_alpha=0.25):
+    def __init__(self, args, num_classes, matcher, weight_dict, losses, invalid_cls_logits, focal_alpha=0.25):
         """ Create the criterion.
         Parameters:
             num_classes: number of object categories, omitting the special no-object category
@@ -216,26 +274,64 @@ class SetCriterion(nn.Module):
         self.weight_dict = weight_dict
         self.losses = losses
         self.focal_alpha = focal_alpha
+        self.nc_epoch = args.nc_epoch
+        self.output_dir = args.output_dir
+        self.invalid_cls_logits = invalid_cls_logits
+        self.unmatched_boxes = args.unmatched_boxes
+        self.top_unk = args.top_unk
+        self.bbox_thresh = args.bbox_thresh
+        self.num_seen_classes = args.PREV_INTRODUCED_CLS + args.CUR_INTRODUCED_CLS
 
-    def loss_labels(self, outputs, targets, indices, num_boxes, log=True):
-        """Classification loss (NLL)
-        targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
+
+    def loss_NC_labels(self, outputs, targets, indices, num_boxes, current_epoch, owod_targets, owod_indices, log=True):
+        """Novelty classification loss
+        target labels will contain class as 1
+        owod_indices -> indices combining matched indices + psuedo labeled indices
+        owod_targets -> targets combining GT targets + psuedo labeled unknown targets
+        target_classes_o -> contains all 1's
         """
-        assert 'pred_logits' in outputs
-        src_logits = outputs['pred_logits']
+        assert 'pred_nc_logits' in outputs
+        src_logits = outputs['pred_nc_logits']
 
-        idx = self._get_src_permutation_idx(indices)
-        target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
-        target_classes = torch.full(src_logits.shape[:2], self.num_classes,
-                                    dtype=torch.int64, device=src_logits.device)
+        idx = self._get_src_permutation_idx(owod_indices)
+        target_classes_o = torch.cat([torch.full_like(t["labels"][J], 0) for t, (_, J) in zip(owod_targets, owod_indices)])
+        target_classes = torch.full(src_logits.shape[:2], 1, dtype=torch.int64, device=src_logits.device)
         target_classes[idx] = target_classes_o
 
-        target_classes_onehot = torch.zeros([src_logits.shape[0], src_logits.shape[1], src_logits.shape[2] + 1],
-                                            dtype=src_logits.dtype, layout=src_logits.layout, device=src_logits.device)
+        target_classes_onehot = torch.zeros([src_logits.shape[0], src_logits.shape[1], src_logits.shape[2] + 1], dtype=src_logits.dtype, layout=src_logits.layout, device=src_logits.device)
         target_classes_onehot.scatter_(2, target_classes.unsqueeze(-1), 1)
 
         target_classes_onehot = target_classes_onehot[:,:,:-1]
         loss_ce = sigmoid_focal_loss(src_logits, target_classes_onehot, num_boxes, alpha=self.focal_alpha, gamma=2) * src_logits.shape[1]
+
+        losses = {'loss_NC': loss_ce}
+        return losses
+
+    def loss_labels(self, outputs, targets, indices, num_boxes, current_epoch, owod_targets, owod_indices, log=True):
+        """Classification loss (NLL)
+        targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
+        """
+        assert 'pred_logits' in outputs
+        ## comment lines from 317-320 when running for oracle settings
+        temp_src_logits = outputs['pred_logits'].clone()
+        temp_src_logits[:,:, self.invalid_cls_logits] = -10e10
+        src_logits = temp_src_logits
+
+        if self.unmatched_boxes:
+            idx = self._get_src_permutation_idx(owod_indices)
+            target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(owod_targets, owod_indices)])
+        else:
+            idx = self._get_src_permutation_idx(indices)
+            target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
+
+        target_classes = torch.full(src_logits.shape[:2], self.num_classes, dtype=torch.int64, device=src_logits.device)
+        target_classes[idx] = target_classes_o
+        target_classes_onehot = torch.zeros([src_logits.shape[0], src_logits.shape[1], src_logits.shape[2] + 1],
+                                            dtype=src_logits.dtype, layout=src_logits.layout, device=src_logits.device)
+        target_classes_onehot.scatter_(2, target_classes.unsqueeze(-1), 1)
+        target_classes_onehot = target_classes_onehot[:,:,:-1]
+        loss_ce = sigmoid_focal_loss(src_logits, target_classes_onehot, num_boxes, alpha=self.focal_alpha, gamma=2) * src_logits.shape[1]
+
         losses = {'loss_ce': loss_ce}
 
         if log:
@@ -244,24 +340,32 @@ class SetCriterion(nn.Module):
         return losses
 
     @torch.no_grad()
-    def loss_cardinality(self, outputs, targets, indices, num_boxes):
+    def loss_cardinality(self, outputs, targets, indices, num_boxes, current_epoch, owod_targets, owod_indices):
         """ Compute the cardinality error, ie the absolute error in the number of predicted non-empty boxes
         This is not really a loss, it is intended for logging purposes only. It doesn't propagate gradients
         """
-        pred_logits = outputs['pred_logits']
+        temp_pred_logits = outputs['pred_logits'].clone()
+        temp_pred_logits[:,:, self.invalid_cls_logits] = -10e10
+        pred_logits = temp_pred_logits
+     
         device = pred_logits.device
-        tgt_lengths = torch.as_tensor([len(v["labels"]) for v in targets], device=device)
+        if self.unmatched_boxes:
+            tgt_lengths = torch.as_tensor([len(v["labels"]) for v in owod_targets], device=device)
+        else:
+            tgt_lengths = torch.as_tensor([len(v["labels"]) for v in targets], device=device)
         # Count the number of predictions that are NOT "no-object" (which is the last class)
         card_pred = (pred_logits.argmax(-1) != pred_logits.shape[-1] - 1).sum(1)
         card_err = F.l1_loss(card_pred.float(), tgt_lengths.float())
         losses = {'cardinality_error': card_err}
         return losses
 
-    def loss_boxes(self, outputs, targets, indices, num_boxes):
+    def loss_boxes(self, outputs, targets, indices, num_boxes, current_epoch, owod_targets, owod_indices):
+    # def loss_boxes(self, outputs, targets, indices, num_boxes, current_epoch, owod_targets, owod_indices, ca_owod_targets, ca_owod_indices):
         """Compute the losses related to the bounding boxes, the L1 regression loss and the GIoU loss
            targets dicts must contain the key "boxes" containing a tensor of dim [nb_target_boxes, 4]
            The target boxes are expected in format (center_x, center_y, h, w), normalized by the image size.
         """
+
         assert 'pred_boxes' in outputs
         idx = self._get_src_permutation_idx(indices)
         src_boxes = outputs['pred_boxes'][idx]
@@ -278,7 +382,7 @@ class SetCriterion(nn.Module):
         losses['loss_giou'] = loss_giou.sum() / num_boxes
         return losses
 
-    def loss_masks(self, outputs, targets, indices, num_boxes):
+    def loss_masks(self, outputs, targets, indices, num_boxes, current_epoch, owod_targets, owod_indices):
         """Compute the losses related to the masks: the focal loss and the dice loss.
            targets dicts must contain the key "masks" containing a tensor of dim [nb_target_boxes, h, w]
         """
@@ -307,10 +411,25 @@ class SetCriterion(nn.Module):
         }
         return losses
 
+    def save_dict(self, di_, filename_):
+        with open(filename_, 'wb') as f:
+            pickle.dump(di_, f)
+
+    def load_dict(self, filename_):
+        with open(filename_, 'rb') as f:
+            ret_dict = pickle.load(f)
+        return ret_dict
+
     def _get_src_permutation_idx(self, indices):
         # permute predictions following indices
         batch_idx = torch.cat([torch.full_like(src, i) for i, (src, _) in enumerate(indices)])
         src_idx = torch.cat([src for (src, _) in indices])
+        return batch_idx, src_idx
+
+    def _get_src_single_permutation_idx(self, indices, index):
+        ## Only need the src query index selection from this function for attention feature selection
+        batch_idx = [torch.full_like(src, i) for i, src in enumerate(indices)][0]
+        src_idx = indices[0]
         return batch_idx, src_idx
 
     def _get_tgt_permutation_idx(self, indices):
@@ -319,27 +438,79 @@ class SetCriterion(nn.Module):
         tgt_idx = torch.cat([tgt for (_, tgt) in indices])
         return batch_idx, tgt_idx
 
-    def get_loss(self, loss, outputs, targets, indices, num_boxes, **kwargs):
+    def get_loss(self, loss, outputs, targets, indices, num_boxes, epoch, owod_targets, owod_indices, **kwargs):
         loss_map = {
             'labels': self.loss_labels,
+            'NC_labels': self.loss_NC_labels,
             'cardinality': self.loss_cardinality,
             'boxes': self.loss_boxes,
             'masks': self.loss_masks
         }
         assert loss in loss_map, f'do you really want to compute {loss} loss?'
-        return loss_map[loss](outputs, targets, indices, num_boxes, **kwargs)
+        return loss_map[loss](outputs, targets, indices, num_boxes, epoch, owod_targets, owod_indices, **kwargs)
 
-    def forward(self, outputs, targets):
+    def forward(self, samples, outputs, targets, epoch):
         """ This performs the loss computation.
         Parameters:
              outputs: dict of tensors, see the output specification of the model for the format
              targets: list of dicts, such that len(targets) == batch_size.
                       The expected keys in each dict depends on the losses applied, see each loss' doc
         """
-        outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs' and k != 'enc_outputs'}
+        if self.nc_epoch > 0:
+            loss_epoch = 9
+        else:
+            loss_epoch = 0
 
-        # Retrieve the matching between the outputs of the last layer and the targets
+        outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs' and k != 'enc_outputs'}
         indices = self.matcher(outputs_without_aux, targets)
+    
+        owod_targets = deepcopy(targets)
+        owod_indices = deepcopy(indices)
+
+
+        owod_outputs = outputs_without_aux.copy()
+        owod_device = owod_outputs["pred_boxes"].device
+
+        if self.unmatched_boxes and epoch >= loss_epoch:
+            ## get pseudo unmatched boxes from this section
+            res_feat = torch.mean(outputs['resnet_1024_feat'], 1)
+            queries = torch.arange(outputs['pred_logits'].shape[1])
+            for i in range(len(indices)):
+                combined = torch.cat((queries, self._get_src_single_permutation_idx(indices[i], i)[-1])) ## need to fix the indexing
+                uniques, counts = combined.unique(return_counts=True)
+                unmatched_indices = uniques[counts == 1]
+                boxes = outputs_without_aux['pred_boxes'][i] #[unmatched_indices,:]
+                img = samples.tensors[i].cpu().permute(1,2,0).numpy()
+                h, w = img.shape[:-1]
+                img_w = torch.tensor(w, device=owod_device)
+                img_h = torch.tensor(h, device=owod_device)
+                unmatched_boxes = box_ops.box_cxcywh_to_xyxy(boxes)
+                unmatched_boxes = unmatched_boxes * torch.tensor([img_w, img_h, img_w, img_h], dtype=torch.float32).to(owod_device)
+                means_bb = torch.zeros(queries.shape[0]).to(unmatched_boxes)
+                bb = unmatched_boxes
+                for j, _ in enumerate(means_bb):
+                    if j in unmatched_indices:
+                        upsaple = nn.Upsample(size=(img_h,img_w), mode='bilinear')
+                        img_feat = upsaple(res_feat[i].unsqueeze(0).unsqueeze(0))
+                        img_feat = img_feat.squeeze(0).squeeze(0)
+                        xmin = bb[j,:][0].long()
+                        ymin = bb[j,:][1].long()
+                        xmax = bb[j,:][2].long()
+                        ymax = bb[j,:][3].long()
+                        means_bb[j] = torch.mean(img_feat[ymin:ymax,xmin:xmax])
+                        if torch.isnan(means_bb[j]):
+                            means_bb[j] = -10e10
+                    else:
+                         means_bb[j] = -10e10
+
+                _, topk_inds =  torch.topk(means_bb, self.top_unk)
+                topk_inds = torch.as_tensor(topk_inds)
+                    
+                topk_inds = topk_inds.cpu()
+
+                unk_label = torch.as_tensor([self.num_classes-1], device=owod_device)
+                owod_targets[i]['labels'] = torch.cat((owod_targets[i]['labels'], unk_label.repeat_interleave(self.top_unk)))
+                owod_indices[i] = (torch.cat((owod_indices[i][0], topk_inds)), torch.cat((owod_indices[i][1], (owod_targets[i]['labels'] == unk_label).nonzero(as_tuple=True)[0].cpu())))
 
         # Compute the average number of target boxes accross all nodes, for normalization purposes
         num_boxes = sum(len(t["labels"]) for t in targets)
@@ -352,12 +523,60 @@ class SetCriterion(nn.Module):
         losses = {}
         for loss in self.losses:
             kwargs = {}
-            losses.update(self.get_loss(loss, outputs, targets, indices, num_boxes, **kwargs))
+            losses.update(self.get_loss(loss, outputs, targets, indices, num_boxes, epoch, owod_targets, owod_indices, **kwargs))
 
         # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
         if 'aux_outputs' in outputs:
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
                 indices = self.matcher(aux_outputs, targets)
+
+                owod_targets = deepcopy(targets)
+                owod_indices = deepcopy(indices)
+
+                aux_owod_outputs = aux_outputs.copy()
+                owod_device = aux_owod_outputs["pred_boxes"].device
+
+                if self.unmatched_boxes and epoch >= loss_epoch:
+                    ## get pseudo unmatched boxes from this section
+                    res_feat = torch.mean(outputs['resnet_1024_feat'], 1) #2 X 67 X 50
+                    queries = torch.arange(aux_owod_outputs['pred_logits'].shape[1])
+                    for i in range(len(indices)):
+                        combined = torch.cat((queries, self._get_src_single_permutation_idx(indices[i], i)[-1])) ## need to fix the indexing
+                        uniques, counts = combined.unique(return_counts=True)
+                        unmatched_indices = uniques[counts == 1]
+                        boxes = aux_owod_outputs['pred_boxes'][i] #[unmatched_indices,:]
+                        img = samples.tensors[i].cpu().permute(1,2,0).numpy()
+                        h, w = img.shape[:-1]
+                        img_w = torch.tensor(w, device=owod_device)
+                        img_h = torch.tensor(h, device=owod_device)
+                        unmatched_boxes = box_ops.box_cxcywh_to_xyxy(boxes)
+                        unmatched_boxes = unmatched_boxes * torch.tensor([img_w, img_h, img_w, img_h], dtype=torch.float32).to(owod_device)
+                        means_bb = torch.zeros(queries.shape[0]).to(unmatched_boxes) #torch.zeros(unmatched_boxes.shape[0])
+                        bb = unmatched_boxes
+                        ## [INFO]: iterating over the full list of boxes and then selecting the unmatched ones
+                        for j, _ in enumerate(means_bb):
+                            if j in unmatched_indices:
+                                upsaple = nn.Upsample(size=(img_h,img_w), mode='bilinear')
+                                img_feat = upsaple(res_feat[i].unsqueeze(0).unsqueeze(0))
+                                img_feat = img_feat.squeeze(0).squeeze(0)
+                                xmin = bb[j,:][0].long()
+                                ymin = bb[j,:][1].long()
+                                xmax = bb[j,:][2].long()
+                                ymax = bb[j,:][3].long()
+                                means_bb[j] = torch.mean(img_feat[ymin:ymax,xmin:xmax])
+                                if torch.isnan(means_bb[j]):
+                                    means_bb[j] = -10e10
+                            else:
+                                means_bb[j] = -10e10
+
+                        _, topk_inds =  torch.topk(means_bb, self.top_unk)
+                        topk_inds = torch.as_tensor(topk_inds)
+
+                        topk_inds = topk_inds.cpu()
+                        unk_label = torch.as_tensor([self.num_classes-1], device=owod_device)
+                        owod_targets[i]['labels'] = torch.cat((owod_targets[i]['labels'], unk_label.repeat_interleave(self.top_unk)))
+                        owod_indices[i] = (torch.cat((owod_indices[i][0], topk_inds)), torch.cat((owod_indices[i][1], (owod_targets[i]['labels'] == unk_label).nonzero(as_tuple=True)[0].cpu())))
+                        
                 for loss in self.losses:
                     if loss == 'masks':
                         # Intermediate masks losses are too costly to compute, we ignore them.
@@ -366,7 +585,7 @@ class SetCriterion(nn.Module):
                     if loss == 'labels':
                         # Logging is enabled only for the last layer
                         kwargs['log'] = False
-                    l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_boxes, **kwargs)
+                    l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_boxes, epoch, owod_targets, owod_indices, **kwargs)
                     l_dict = {k + f'_{i}': v for k, v in l_dict.items()}
                     losses.update(l_dict)
 
@@ -425,7 +644,6 @@ class PostProcess(nn.Module):
 
         return results
 
-
 class MLP(nn.Module):
     """ Very simple multi-layer perceptron (also called FFN)"""
 
@@ -442,14 +660,22 @@ class MLP(nn.Module):
 
 
 def build(args):
-    num_classes = 20 if args.dataset_file != 'coco' else 91
-    if args.dataset_file == "coco_panoptic":
+    num_classes = args.num_classes
+    print(num_classes)
+    if args.dataset == "coco_panoptic":
         num_classes = 250
     device = torch.device(args.device)
 
     backbone = build_backbone(args)
 
     transformer = build_deforamble_transformer(args)
+
+    prev_intro_cls = args.PREV_INTRODUCED_CLS
+    curr_intro_cls = args.CUR_INTRODUCED_CLS
+    seen_classes = prev_intro_cls + curr_intro_cls
+    invalid_cls_logits = list(range(seen_classes, num_classes-1)) #unknown class indx will not be included in the invalid class range
+    print("Invalid class rangw: " + str(invalid_cls_logits))
+
     model = DeformableDETR(
         backbone,
         transformer,
@@ -459,11 +685,18 @@ def build(args):
         aux_loss=args.aux_loss,
         with_box_refine=args.with_box_refine,
         two_stage=args.two_stage,
+        unmatched_boxes=args.unmatched_boxes,
+        novelty_cls=args.NC_branch,
+        featdim=args.featdim,
     )
     if args.masks:
         model = DETRsegm(model, freeze_detr=(args.frozen_weights is not None))
     matcher = build_matcher(args)
+
     weight_dict = {'loss_ce': args.cls_loss_coef, 'loss_bbox': args.bbox_loss_coef}
+    if args.NC_branch:
+        weight_dict = {'loss_ce': args.cls_loss_coef, 'loss_NC': args.nc_loss_coef, 'loss_bbox': args.bbox_loss_coef}
+
     weight_dict['loss_giou'] = args.giou_loss_coef
     if args.masks:
         weight_dict["loss_mask"] = args.mask_loss_coef
@@ -477,15 +710,16 @@ def build(args):
         weight_dict.update(aux_weight_dict)
 
     losses = ['labels', 'boxes', 'cardinality']
+    if args.NC_branch:
+        losses = ['labels', 'NC_labels', 'boxes', 'cardinality']
     if args.masks:
         losses += ["masks"]
-    # num_classes, matcher, weight_dict, losses, focal_alpha=0.25
-    criterion = SetCriterion(num_classes, matcher, weight_dict, losses, focal_alpha=args.focal_alpha)
+    criterion = SetCriterion(args, num_classes, matcher, weight_dict, losses, invalid_cls_logits, focal_alpha=args.focal_alpha)
     criterion.to(device)
     postprocessors = {'bbox': PostProcess()}
     if args.masks:
         postprocessors['segm'] = PostProcessSegm()
-        if args.dataset_file == "coco_panoptic":
+        if args.dataset == "coco_panoptic":
             is_thing_map = {i: i <= 90 for i in range(201)}
             postprocessors["panoptic"] = PostProcessPanoptic(is_thing_map, threshold=0.85)
 

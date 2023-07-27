@@ -1,94 +1,42 @@
-# Deformable DETR
+# OW-DETR: Open-world Detection Transformer (CVPR 2022)
 
-By [Xizhou Zhu](https://scholar.google.com/citations?user=02RXI00AAAAJ),  [Weijie Su](https://www.weijiesu.com/),  [Lewei Lu](https://www.linkedin.com/in/lewei-lu-94015977/), [Bin Li](http://staff.ustc.edu.cn/~binli/), [Xiaogang Wang](http://www.ee.cuhk.edu.hk/~xgwang/), [Jifeng Dai](https://jifengdai.org/).
+[`Paper`](https://openaccess.thecvf.com/content/CVPR2022/papers/Gupta_OW-DETR_Open-World_Detection_Transformer_CVPR_2022_paper.pdf) [`Video`](https://www.youtube.com/watch?v=saO8RHCpnaY) [`slides`](https://docs.google.com/presentation/d/1I1OyoRbKqvwB_dSLM8ybSXrB74crPX2a9R9yyWvABDc/edit?usp=sharing) [`summary slide`](https://docs.google.com/presentation/d/1zABTrvkaYlqb7u6xWv1JPIHFdsAyRkAggnmj33kuwsE/edit?usp=sharing)
 
-This repository is an official implementation of the paper [Deformable DETR: Deformable Transformers for End-to-End Object Detection](https://arxiv.org/abs/2010.04159).
+#### [Akshita Gupta](https://akshitac8.github.io/)<sup>\*</sup>, [Sanath Narayan](https://sites.google.com/view/sanath-narayan)<sup>\*</sup>, [K J Joseph](https://josephkj.in), [Salman Khan](https://salman-h-khan.github.io/), [Fahad Shahbaz Khan](https://sites.google.com/view/fahadkhans/home), [Mubarak Shah](https://scholar.google.com/citations?user=p8gsO3gAAAAJ&hl=en) ####
 
+(:star2: denotes equal contribution)
 
-## Introduction
+# Introduction
 
-**TL; DR.** Deformable DETR is an efficient and fast-converging end-to-end object detector. It mitigates the high complexity and slow convergence issues of DETR via a novel sampling-based efficient attention mechanism.  
+ Open-world object detection (OWOD) is a challenging computer vision problem, where the task is to detect a known set of object categories while simultaneously identifying unknown objects. Additionally, the model must incrementally learn new classes that become known in the next training episodes. Distinct from standard object detection, the OWOD setting poses significant challenges for generating quality candidate proposals on potentially unknown objects, separating the unknown objects from the background and detecting diverse unknown objects. Here, we introduce a novel end-to-end transformer-based  framework, OW-DETR, for open-world object detection. The proposed OW-DETR comprises three dedicated components namely, attention-driven pseudo-labeling, novelty classification and objectness scoring  to explicitly address the aforementioned OWOD challenges. Our OW-DETR explicitly encodes multi-scale contextual information, possesses less inductive bias, enables knowledge transfer from known classes to the unknown class and can better discriminate between unknown objects and background. Comprehensive experiments are performed on two benchmarks: MS-COCO and PASCAL VOC. The extensive ablations reveal the merits of our proposed contributions. Further, our model outperforms the recently introduced OWOD approach, ORE, with absolute gains ranging from  $1.8\%$ to $3.3\%$ in terms of unknown recall on MS-COCO. In the case of incremental object detection, OW-DETR outperforms the state-of-the-art for all settings on PASCAL VOC.
+<br>
 
-![deformable_detr](./figs/illustration.png)
+<p align="center" ><img width='350' src = "https://imgur.com/KXDXiAB.png"></p> 
 
-![deformable_detr](./figs/convergence.png)
+<br>
 
-**Abstract.** DETR has been recently proposed to eliminate the need for many hand-designed components in object detection while demonstrating good performance. However, it suffers from slow convergence and limited feature spatial resolution, due to the limitation of Transformer attention modules in processing image feature maps. To mitigate these issues, we proposed Deformable DETR, whose attention modules only attend to a small set of key sampling points around a reference. Deformable DETR can achieve better performance than DETR (especially on small objects) with 10× less training epochs. Extensive experiments on the COCO benchmark demonstrate the effectiveness of our approach.
-
-## License
-
-This project is released under the [Apache 2.0 license](./LICENSE).
-
-## Changelog
-
-See [changelog.md](./docs/changelog.md) for detailed logs of major changes. 
+<p align="center" ><img width='500' src = "https://imgur.com/cyeMXuh.png"></p> 
 
 
-## Citing Deformable DETR
-If you find Deformable DETR useful in your research, please consider citing:
-```bibtex
-@article{zhu2020deformable,
-  title={Deformable DETR: Deformable Transformers for End-to-End Object Detection},
-  author={Zhu, Xizhou and Su, Weijie and Lu, Lewei and Li, Bin and Wang, Xiaogang and Dai, Jifeng},
-  journal={arXiv preprint arXiv:2010.04159},
-  year={2020}
-}
-```
-
-## Main Results
-
-| <sub><sub>Method</sub></sub>   | <sub><sub>Epochs</sub></sub> | <sub><sub>AP</sub></sub> | <sub><sub>AP<sub>S</sub></sub></sub> | <sub><sub>AP<sub>M</sub></sub></sub> | <sub><sub>AP<sub>L</sub></sub></sub> | <sub><sub>params<br>(M)</sub></sub> | <sub><sub>FLOPs<br>(G)</sub></sub> | <sub><sub>Total<br>Train<br>Time<br>(GPU<br/>hours)</sub></sub> | <sub><sub>Train<br/>Speed<br>(GPU<br/>hours<br/>/epoch)</sub></sub> | <sub><sub>Infer<br/>Speed<br/>(FPS)</sub></sub> | <sub><sub>Batch<br/>Infer<br/>Speed<br>(FPS)</sub></sub> | <sub><sub>URL</sub></sub>                     |
-| ----------------------------------- | :----: | :--: | :----: | :---: | :------------------------------: | :--------------------:| :----------------------------------------------------------: | :--: | :---: | :---: | ----- | ----- |
-| <sub><sub>Faster R-CNN + FPN</sub></sub> | <sub>109</sub> | <sub>42.0</sub> | <sub>26.6</sub> | <sub>45.4</sub> | <sub>53.4</sub> | <sub>42</sub> | <sub>180</sub> | <sub>380</sub> | <sub>3.5</sub> | <sub>25.6</sub> | <sub>28.0</sub> | <sub>-</sub> |
-| <sub><sub>DETR</sub></sub> | <sub>500</sub> | <sub>42.0</sub> | <sub>20.5</sub> | <sub>45.8</sub> | <sub>61.1</sub> | <sub>41</sub> | <sub>86</sub> | <sub>2000</sub> | <sub>4.0</sub> |     <sub>27.0</sub>       |         <sub>38.3</sub>           | <sub>-</sub> |
-| <sub><sub>DETR-DC5</sub></sub>      | <sub>500</sub> | <sub>43.3</sub> | <sub>22.5</sub> | <sub>47.3</sub> | <sub>61.1</sub> | <sub>41</sub> |<sub>187</sub>|<sub>7000</sub>|<sub>14.0</sub>|<sub>11.4</sub>|<sub>12.4</sub>| <sub>-</sub> |
-| <sub><sub>DETR-DC5</sub></sub>      | <sub>50</sub> | <sub>35.3</sub> | <sub>15.2</sub> | <sub>37.5</sub> | <sub>53.6</sub> | <sub>41</sub> |<sub>187</sub>|<sub>700</sub>|<sub>14.0</sub>|<sub>11.4</sub>|<sub>12.4</sub>| <sub>-</sub> |
-| <sub><sub>DETR-DC5+</sub></sub>     | <sub>50</sub> | <sub>36.2</sub> | <sub>16.3</sub> | <sub>39.2</sub> | <sub>53.9</sub> | <sub>41</sub> |<sub>187</sub>|<sub>700</sub>|<sub>14.0</sub>|<sub>11.4</sub>|<sub>12.4</sub>| <sub>-</sub> |
-| **<sub><sub>Deformable DETR<br>(single scale)</sub></sub>** | <sub>50</sub> | <sub>39.4</sub> | <sub>20.6</sub> | <sub>43.0</sub> | <sub>55.5</sub> | <sub>34</sub> |<sub>78</sub>|<sub>160</sub>|<sub>3.2</sub>|<sub>27.0</sub>|<sub>42.4</sub>| <sub>[config](./configs/r50_deformable_detr_single_scale.sh)<br/>[log](https://drive.google.com/file/d/1n3ZnZ-UAqmTUR4AZoM4qQntIDn6qCZx4/view?usp=sharing)<br/>[model](https://drive.google.com/file/d/1WEjQ9_FgfI5sw5OZZ4ix-OKk-IJ_-SDU/view?usp=sharing)</sub> |
-| **<sub><sub>Deformable DETR<br>(single scale, DC5)</sub></sub>** | <sub>50</sub> | <sub>41.5</sub> | <sub>24.1</sub> | <sub>45.3</sub> | <sub>56.0</sub> | <sub>34</sub> |<sub>128</sub>|<sub>215</sub>|<sub>4.3</sub>|<sub>22.1</sub>|<sub>29.4</sub>| <sub>[config](./configs/r50_deformable_detr_single_scale_dc5.sh)<br/>[log](https://drive.google.com/file/d/1-UfTp2q4GIkJjsaMRIkQxa5k5vn8_n-B/view?usp=sharing)<br/>[model](https://drive.google.com/file/d/1m_TgMjzH7D44fbA-c_jiBZ-xf-odxGdk/view?usp=sharing)</sub> |
-| **<sub><sub>Deformable DETR</sub></sub>** | <sub>50</sub> | <sub>44.5</sub> | <sub>27.1</sub> | <sub>47.6</sub> | <sub>59.6</sub> | <sub>40</sub> |<sub>173</sub>|<sub>325</sub>|<sub>6.5</sub>|<sub>15.0</sub>|<sub>19.4</sub>|<sub>[config](./configs/r50_deformable_detr.sh)<br/>[log](https://drive.google.com/file/d/18YSLshFjc_erOLfFC-hHu4MX4iyz1Dqr/view?usp=sharing)<br/>[model](https://drive.google.com/file/d/1nDWZWHuRwtwGden77NLM9JoWe-YisJnA/view?usp=sharing)</sub>                   |
-| **<sub><sub>+ iterative bounding box refinement</sub></sub>** | <sub>50</sub> | <sub>46.2</sub> | <sub>28.3</sub> | <sub>49.2</sub> | <sub>61.5</sub> | <sub>41</sub> |<sub>173</sub>|<sub>325</sub>|<sub>6.5</sub>|<sub>15.0</sub>|<sub>19.4</sub>|<sub>[config](./configs/r50_deformable_detr_plus_iterative_bbox_refinement.sh)<br/>[log](https://drive.google.com/file/d/1DFNloITi1SFBWjYzvVEAI75ndwmGM1Uj/view?usp=sharing)<br/>[model](https://drive.google.com/file/d/1JYKyRYzUH7uo9eVfDaVCiaIGZb5YTCuI/view?usp=sharing)</sub> |
-| **<sub><sub>++ two-stage Deformable DETR</sub></sub>** | <sub>50</sub> | <sub>46.9</sub> | <sub>29.6</sub> | <sub>50.1</sub> | <sub>61.6</sub> | <sub>41</sub> |<sub>173</sub>|<sub>340</sub>|<sub>6.8</sub>|<sub>14.5</sub>|<sub>18.8</sub>|<sub>[config](./configs/r50_deformable_detr_plus_iterative_bbox_refinement_plus_plus_two_stage.sh)<br/>[log](https://drive.google.com/file/d/1ozi0wbv5-Sc5TbWt1jAuXco72vEfEtbY/view?usp=sharing) <br/>[model](https://drive.google.com/file/d/15I03A7hNTpwuLNdfuEmW9_taZMNVssEp/view?usp=sharing)</sub> |
-
-*Note:*
-
-1. All models of Deformable DETR are trained with total batch size of 32. 
-2. Training and inference speed are measured on NVIDIA Tesla V100 GPU.
-3. "Deformable DETR (single scale)" means only using res5 feature map (of stride 32) as input feature maps for Deformable Transformer Encoder.
-4. "DC5" means removing the stride in C5 stage of ResNet and add a dilation of 2 instead.
-5. "DETR-DC5+" indicates DETR-DC5 with some modifications, including using Focal Loss for bounding box classification and increasing number of object queries to 300.
-6. "Batch Infer Speed" refer to inference with batch size = 4  to maximize GPU utilization.
-7. The original implementation is based on our internal codebase. There are slight differences in the final accuracy and running time due to the plenty details in platform switch.
 
 
-## Installation
+
+# Installation
 
 ### Requirements
 
-* Linux, CUDA>=9.2, GCC>=5.4
-  
-* Python>=3.7
+We have trained and tested our models on `Ubuntu 16.0`, `CUDA 10.2`, `GCC 5.4`, `Python 3.7`
 
-    We recommend you to use Anaconda to create a conda environment:
-    ```bash
-    conda create -n deformable_detr python=3.7 pip
-    ```
-    Then, activate the environment:
-    ```bash
-    conda activate deformable_detr
-    ```
-  
-* PyTorch>=1.5.1, torchvision>=0.6.1 (following instructions [here](https://pytorch.org/))
+```bash
+conda create -n owdetr python=3.7 pip
+conda activate owdetr
+conda install pytorch==1.8.0 torchvision==0.9.0 torchaudio==0.8.0 cudatoolkit=10.2 -c pytorch
+pip install -r requirements.txt
+```
 
-    For example, if your CUDA version is 9.2, you could install pytorch and torchvision as following:
-    ```bash
-    conda install pytorch=1.5.1 torchvision=0.6.1 cudatoolkit=9.2 -c pytorch
-    ```
-  
-* Other requirements
-    ```bash
-    pip install -r requirements.txt
-    ```
+### Backbone features
+
+Download the self-supervised backbone from [here](https://dl.fbaipublicfiles.com/dino/dino_resnet50_pretrain/dino_resnet50_pretrain.pth) and add in `models` folder.
 
 ### Compiling CUDA operators
 ```bash
@@ -98,72 +46,206 @@ sh ./make.sh
 python test.py
 ```
 
-## Usage
 
-### Dataset preparation
+# Dataset & Results
 
-Please download [COCO 2017 dataset](https://cocodataset.org/) and organize them as following:
+### OWOD proposed splits
+<br>
+<p align="center" ><img width='500' src = "https://imgur.com/9bzf3DV.png"></p> 
+<br>
 
+The splits are present inside `data/VOC2007/OWOD/ImageSets/` folder. The remaining dataset can be downloaded using this [link](https://drive.google.com/drive/folders/1S5L-YmIiFMAKTs6nHMorB0Osz5iWI31k?usp=sharing)
+
+The files should be organized in the following structure:
 ```
-code_root/
+OW-DETR/
+└── data/
+    └── VOC2007/
+        └── OWOD/
+        	├── JPEGImages
+        	├── ImageSets
+        	└── Annotations
+```
+
+### Results
+
+<table align="center">
+    <tr>
+        <th> </th>
+        <th align="center" colspan=2>Task1</th>
+        <th align="center" colspan=2>Task2</th>
+        <th align="center" colspan=2>Task3</th>
+        <th align="center" colspan=1>Task4</th>
+    </tr>
+    <tr>
+        <td align="left">Method</td>
+        <td align="center">U-Recall</td>
+        <td align="center">mAP</td>
+        <td align="center">U-Recall</td>
+        <td align="center">mAP</td>
+        <td align="center">U-Recall</td>
+        <td align="center">mAP</td>
+        <td align="center">mAP</td>
+    </tr>
+    <tr>
+        <td align="left">ORE-EBUI</td>
+        <td align="center">4.9</td>
+        <td align="center">56.0</td>
+        <td align="center">2.9</td>
+        <td align="center">39.4</td>
+        <td align="center">3.9</td>
+        <td align="center">29.7</td>
+        <td align="center">25.3</td>
+    </tr>
+    <tr>
+        <td align="left">OW-DETR</td>
+        <td align="center">7.5</td>
+        <td align="center">59.2</td>
+        <td align="center">6.2</td>
+        <td align="center">42.9</td>
+        <td align="center">5.7</td>
+        <td align="center">30.8</td>
+        <td align="center">27.8</td>
+    </tr>
+</table>
+
+
+
+### Our proposed splits
+
+<br>
+<p align="center" ><img width='500' src = "https://imgur.com/RlqbheH.png"></p> 
+<br>
+
+#### Dataset Preparation
+
+The splits are present inside `data/VOC2007/OWDETR/ImageSets/` folder.
+1. Make empty `JPEGImages` and `Annotations` directory.
+```
+mkdir data/VOC2007/OWDETR/JPEGImages/
+mkdir data/VOC2007/OWDETR/Annotations/
+```
+2. Download the COCO Images and Annotations from [coco dataset](https://cocodataset.org/#download).
+3. Unzip train2017 and val2017 folder. The current directory structure should look like:
+```
+OW-DETR/
 └── data/
     └── coco/
+        ├── annotations/
         ├── train2017/
-        ├── val2017/
-        └── annotations/
-        	├── instances_train2017.json
-        	└── instances_val2017.json
+        └── val2017/
+```
+4. Move all images from `train2017/` and `val2017/` to `JPEGImages` folder.
+```
+cd OW-DETR/data
+mv data/coco/train2017/*.jpg data/VOC2007/OWDETR/JPEGImages/.
+mv data/coco/val2017/*.jpg data/VOC2007/OWDETR/JPEGImages/.
+```
+5. Use the code `coco2voc.py` for converting json annotations to xml files.
+
+The files should be organized in the following structure:
+```
+OW-DETR/
+└── data/
+    └── VOC2007/
+        └── OWDETR/
+        	├── JPEGImages
+        	├── ImageSets
+        	└── Annotations
 ```
 
-### Training
+
+Currently, Dataloader and Evaluator followed for OW-DETR is in VOC format.
+
+### Results
+
+<table align="center">
+    <tr>
+        <th> </th>
+        <th align="center" colspan=2>Task1</th>
+        <th align="center" colspan=2>Task2</th>
+        <th align="center" colspan=2>Task3</th>
+        <th align="center" colspan=1>Task4</th>
+    </tr>
+    <tr>
+        <td align="left">Method</td>
+        <td align="center">U-Recall</td>
+        <td align="center">mAP</td>
+        <td align="center">U-Recall</td>
+        <td align="center">mAP</td>
+        <td align="center">U-Recall</td>
+        <td align="center">mAP</td>
+        <td align="center">mAP</td>
+    </tr>
+    <tr>
+        <td align="left">ORE-EBUI</td>
+        <td align="center">1.5</td>
+        <td align="center">61.4</td>
+        <td align="center">3.9</td>
+        <td align="center">40.6</td>
+        <td align="center">3.6</td>
+        <td align="center">33.7</td>
+        <td align="center">31.8</td>
+    </tr>
+    <tr>
+        <td align="left">OW-DETR</td>
+        <td align="center">5.7</td>
+        <td align="center">71.5</td>
+        <td align="center">6.2</td>
+        <td align="center">43.8</td>
+        <td align="center">6.9</td>
+        <td align="center">38.5</td>
+        <td align="center">33.1</td>
+    </tr>
+</table>
+
+    
+# Training
 
 #### Training on single node
 
-For example, the command for training Deformable DETR on 8 GPUs is as following:
-
+To train OW-DETR on a single node with 8 GPUS, run
 ```bash
-GPUS_PER_NODE=8 ./tools/run_dist_launch.sh 8 ./configs/r50_deformable_detr.sh
-```
-
-#### Training on multiple nodes
-
-For example, the command for training Deformable DETR on 2 nodes of each with 8 GPUs is as following:
-
-On node 1:
-
-```bash
-MASTER_ADDR=<IP address of node 1> NODE_RANK=0 GPUS_PER_NODE=8 ./tools/run_dist_launch.sh 16 ./configs/r50_deformable_detr.sh
-```
-
-On node 2:
-
-```bash
-MASTER_ADDR=<IP address of node 1> NODE_RANK=1 GPUS_PER_NODE=8 ./tools/run_dist_launch.sh 16 ./configs/r50_deformable_detr.sh
+./run.sh
 ```
 
 #### Training on slurm cluster
 
-If you are using slurm cluster, you can simply run the following command to train on 1 node with 8 GPUs:
-
+To train OW-DETR on a slurm cluster having 2 nodes with 8 GPUS each, run
 ```bash
-GPUS_PER_NODE=8 ./tools/run_dist_slurm.sh <partition> deformable_detr 8 configs/r50_deformable_detr.sh
+sbatch run_slurm.sh
 ```
 
-Or 2 nodes of  each with 8 GPUs:
+# Evaluation
 
-```bash
-GPUS_PER_NODE=8 ./tools/run_dist_slurm.sh <partition> deformable_detr 16 configs/r50_deformable_detr.sh
-```
-#### Some tips to speed-up training
-* If your file system is slow to read images, you may consider enabling '--cache_mode' option to load whole dataset into memory at the beginning of training.
-* You may increase the batch size to maximize the GPU utilization, according to GPU memory of yours, e.g., set '--batch_size 3' or '--batch_size 4'.
+For reproducing any of the above mentioned results please run the `run_eval.sh` file and add pretrained weights accordingly.
 
-### Evaluation
 
-You can get the config file and pretrained model of Deformable DETR (the link is in "Main Results" session), then run following command to evaluate it on COCO 2017 validation set:
+**Note:**
+For more training and evaluation details please check the [Deformable DETR](https://github.com/fundamentalvision/Deformable-DETR) reposistory.
 
-```bash
-<path to config file> --resume <path to pre-trained model> --eval
-```
+# License
 
-You can also run distributed evaluation by using ```./tools/run_dist_launch.sh``` or ```./tools/run_dist_slurm.sh```.
+This repository is released under the Apache 2.0 license as found in the [LICENSE](LICENSE) file.
+
+
+# Citation
+
+If you use OW-DETR, please consider citing:
+
+    @inproceedings{gupta2021ow,
+        title={OW-DETR: Open-world Detection Transformer}, 
+        author={Gupta, Akshita and Narayan, Sanath and Joseph, KJ and 
+        Khan, Salman and Khan, Fahad Shahbaz and Shah, Mubarak},
+        booktitle={CVPR},
+        year={2022}
+    }
+
+# Contact
+
+Should you have any question, please contact :e-mail: akshita.sem.iitr@gmail.com
+
+**Acknowledgments:**
+
+OW-DETR builds on previous works code base such as [Deformable DETR](https://github.com/fundamentalvision/Deformable-DETR), [Detreg](https://github.com/amirbar/DETReg), and [OWOD](https://github.com/JosephKJ/OWOD). If you found OW-DETR useful please consider citing these works as well.
+

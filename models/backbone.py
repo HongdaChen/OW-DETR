@@ -1,16 +1,17 @@
 # ------------------------------------------------------------------------
-# Deformable DETR
-# Copyright (c) 2020 SenseTime. All Rights Reserved.
-# Licensed under the Apache License, Version 2.0 [see LICENSE for details]
+# OW-DETR: Open-world Detection Transformer
+# Akshita Gupta^, Sanath Narayan^, K J Joseph, Salman Khan, Fahad Shahbaz Khan, Mubarak Shah
+# https://arxiv.org/pdf/2112.01513.pdf
 # ------------------------------------------------------------------------
-# Modified from DETR (https://github.com/facebookresearch/detr)
-# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
+# Modified from Deformable DETR (https://github.com/fundamentalvision/Deformable-DETR)
+# Copyright (c) 2020 SenseTime. All Rights Reserved.
 # ------------------------------------------------------------------------
 
 """
 Backbone modules.
 """
 from collections import OrderedDict
+from torchvision.models.resnet import resnet50
 
 import torch
 import torch.nn.functional as F
@@ -100,9 +101,17 @@ class Backbone(BackboneBase):
                  return_interm_layers: bool,
                  dilation: bool):
         norm_layer = FrozenBatchNorm2d
-        backbone = getattr(torchvision.models, name)(
-            replace_stride_with_dilation=[False, False, dilation],
-            pretrained=is_main_process(), norm_layer=norm_layer)
+        if name == 'resnet50':
+            print("resnet50")
+            backbone = getattr(torchvision.models, name)(
+                replace_stride_with_dilation=[False, False, dilation],
+                pretrained=is_main_process(), norm_layer=norm_layer)
+        else:
+            print("DINO resnet50")
+            backbone = resnet50(pretrained=False, replace_stride_with_dilation=[False, False, dilation], norm_layer=norm_layer)
+            if is_main_process():
+                state_dict = torch.load("/proj/cvl/users/x_fahkh/akshita/Deformable-DETR/models/dino_resnet50_pretrain/dino_resnet50_pretrain.pth")
+                backbone.load_state_dict(state_dict, strict=False)
         assert name not in ('resnet18', 'resnet34'), "number of channels are hard coded"
         super().__init__(backbone, train_backbone, return_interm_layers)
         if dilation:

@@ -19,6 +19,7 @@ from torch.nn.init import xavier_uniform_, constant_, uniform_, normal_
 from util.misc import inverse_sigmoid
 from models.ops.modules import MSDeformAttn
 
+from einops import rearrange
 
 class DeformableTransformer(nn.Module):
     def __init__(self, d_model=256, nhead=8,
@@ -122,8 +123,12 @@ class DeformableTransformer(nn.Module):
         valid_ratio_w = valid_W.float() / W
         valid_ratio = torch.stack([valid_ratio_w, valid_ratio_h], -1)
         return valid_ratio
+    
+    def to_4d(self, x,h,w):
+        return rearrange(x, 'b (h w) c -> b c h w',h=h,w=w)
 
     def forward(self, srcs, masks, pos_embeds, query_embed=None):
+
         assert self.two_stage or query_embed is not None
 
         # prepare input for encoder
@@ -142,6 +147,7 @@ class DeformableTransformer(nn.Module):
             lvl_pos_embed_flatten.append(lvl_pos_embed)
             src_flatten.append(src)
             mask_flatten.append(mask)
+        
         src_flatten = torch.cat(src_flatten, 1)
         mask_flatten = torch.cat(mask_flatten, 1)
         lvl_pos_embed_flatten = torch.cat(lvl_pos_embed_flatten, 1)
@@ -162,7 +168,7 @@ class DeformableTransformer(nn.Module):
             enc_outputs_coord_unact = self.decoder.bbox_embed[self.decoder.num_layers](output_memory) + output_proposals
 
             topk = self.two_stage_num_proposals
-            topk_proposals = torch.topk(enc_outputs_class[..., 0], topk, dim=1)[1]
+            topk_proposals = torch.topk(enc_outputs_class[..., 0], topk, dim=1)[1] ##TODO?? Why only based on first dimension??
             topk_coords_unact = torch.gather(enc_outputs_coord_unact, 1, topk_proposals.unsqueeze(-1).repeat(1, 1, 4))
             topk_coords_unact = topk_coords_unact.detach()
             reference_points = topk_coords_unact.sigmoid()
@@ -177,13 +183,15 @@ class DeformableTransformer(nn.Module):
             init_reference_out = reference_points
 
         # decoder
-        hs, inter_references = self.decoder(tgt, reference_points, memory,
-                                            spatial_shapes, level_start_index, valid_ratios, query_embed, mask_flatten)
+        hs, inter_references = self.decoder(tgt, reference_points, memory, spatial_shapes, level_start_index, valid_ratios, query_embed, mask_flatten)
 
         inter_references_out = inter_references
+
         if self.two_stage:
             return hs, init_reference_out, inter_references_out, enc_outputs_class, enc_outputs_coord_unact
+
         return hs, init_reference_out, inter_references_out, None, None
+        # return hs, init_reference_out, inter_references_out, attention_feature, None, None
 
 
 class DeformableTransformerEncoderLayer(nn.Module):
@@ -303,6 +311,7 @@ class DeformableTransformerDecoderLayer(nn.Module):
         tgt2 = self.cross_attn(self.with_pos_embed(tgt, query_pos),
                                reference_points,
                                src, src_spatial_shapes, level_start_index, src_padding_mask)
+        
         tgt = tgt + self.dropout1(tgt2)
         tgt = self.norm1(tgt)
 
@@ -327,6 +336,7 @@ class DeformableTransformerDecoder(nn.Module):
         output = tgt
 
         intermediate = []
+        # intermediate_attention_feature = []
         intermediate_reference_points = []
         for lid, layer in enumerate(self.layers):
             if reference_points.shape[-1] == 4:
@@ -356,8 +366,7 @@ class DeformableTransformerDecoder(nn.Module):
 
         if self.return_intermediate:
             return torch.stack(intermediate), torch.stack(intermediate_reference_points)
-
-        return output, reference_points
+        return output, reference_points #, attention_feature
 
 
 def _get_clones(module, N):
@@ -390,5 +399,3 @@ def build_deforamble_transformer(args):
         enc_n_points=args.enc_n_points,
         two_stage=args.two_stage,
         two_stage_num_proposals=args.num_queries)
-
-

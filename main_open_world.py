@@ -1,12 +1,11 @@
 # ------------------------------------------------------------------------
-# Deformable DETR
+# OW-DETR: Open-world Detection Transformer
+# Akshita Gupta^, Sanath Narayan^, K J Joseph, Salman Khan, Fahad Shahbaz Khan, Mubarak Shah
+# https://arxiv.org/pdf/2112.01513.pdf
+# ------------------------------------------------------------------------
+# Modified from Deformable DETR (https://github.com/fundamentalvision/Deformable-DETR)
 # Copyright (c) 2020 SenseTime. All Rights Reserved.
-# Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
-# Modified from DETR (https://github.com/facebookresearch/detr)
-# Copyright (c) Facebook, Inc. and its affiliates. All Rights Reserved
-# ------------------------------------------------------------------------
-
 
 import argparse
 import datetime
@@ -14,7 +13,7 @@ import json
 import random
 import time
 from pathlib import Path
-
+import os
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
@@ -22,7 +21,9 @@ import datasets
 import util.misc as utils
 import datasets.samplers as samplers
 from datasets import build_dataset, get_coco_api_from_dataset
-from engine import evaluate, train_one_epoch
+from datasets.coco import make_coco_transforms
+from datasets.torchvision_datasets.open_world import OWDetection
+from engine import evaluate, train_one_epoch, viz
 from models import build_model
 
 
@@ -35,26 +36,18 @@ def get_args_parser():
     parser.add_argument('--lr_linear_proj_mult', default=0.1, type=float)
     parser.add_argument('--batch_size', default=2, type=int)
     parser.add_argument('--weight_decay', default=1e-4, type=float)
-    parser.add_argument('--epochs', default=50, type=int)
+    parser.add_argument('--epochs', default=51, type=int)
     parser.add_argument('--lr_drop', default=40, type=int)
     parser.add_argument('--lr_drop_epochs', default=None, type=int, nargs='+')
     parser.add_argument('--clip_max_norm', default=0.1, type=float,
                         help='gradient clipping max norm')
-
-
     parser.add_argument('--sgd', action='store_true')
-
     # Variants of Deformable DETR
     parser.add_argument('--with_box_refine', default=False, action='store_true')
     parser.add_argument('--two_stage', default=False, action='store_true')
-
     # Model parameters
     parser.add_argument('--frozen_weights', type=str, default=None,
                         help="Path to the pretrained model. If set, only the mask head will be trained")
-
-    # * Backbone
-    parser.add_argument('--backbone', default='resnet50', type=str,
-                        help="Name of the convolutional backbone to use")
     parser.add_argument('--dilation', action='store_true',
                         help="If true, we replace stride with dilation in the last convolutional block (DC5)")
     parser.add_argument('--position_embedding', default='sine', type=str, choices=('sine', 'learned'),
@@ -80,15 +73,12 @@ def get_args_parser():
                         help="Number of query slots")
     parser.add_argument('--dec_n_points', default=4, type=int)
     parser.add_argument('--enc_n_points', default=4, type=int)
-
     # * Segmentation
     parser.add_argument('--masks', action='store_true',
                         help="Train segmentation head if the flag is provided")
-
     # Loss
     parser.add_argument('--no_aux_loss', dest='aux_loss', action='store_false',
                         help="Disables auxiliary decoding losses (loss at each layer)")
-
     # * Matcher
     parser.add_argument('--set_cost_class', default=2, type=float,
                         help="Class coefficient in the matching cost")
@@ -96,21 +86,17 @@ def get_args_parser():
                         help="L1 box coefficient in the matching cost")
     parser.add_argument('--set_cost_giou', default=2, type=float,
                         help="giou box coefficient in the matching cost")
-
     # * Loss coefficients
     parser.add_argument('--mask_loss_coef', default=1, type=float)
     parser.add_argument('--dice_loss_coef', default=1, type=float)
     parser.add_argument('--cls_loss_coef', default=2, type=float)
+    
     parser.add_argument('--bbox_loss_coef', default=5, type=float)
     parser.add_argument('--giou_loss_coef', default=2, type=float)
     parser.add_argument('--focal_alpha', default=0.25, type=float)
-
     # dataset parameters
-    parser.add_argument('--dataset_file', default='coco')
-    parser.add_argument('--coco_path', default='./data/coco', type=str)
     parser.add_argument('--coco_panoptic_path', type=str)
     parser.add_argument('--remove_difficult', action='store_true')
-
     parser.add_argument('--output_dir', default='',
                         help='path where to save, empty for no saving')
     parser.add_argument('--device', default='cuda',
@@ -120,11 +106,30 @@ def get_args_parser():
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
     parser.add_argument('--eval', action='store_true')
+    parser.add_argument('--viz', action='store_true')
+    parser.add_argument('--eval_every', default=1, type=int)
     parser.add_argument('--num_workers', default=2, type=int)
     parser.add_argument('--cache_mode', default=False, action='store_true', help='whether to cache images on memory')
 
+    ## OWOD
+    parser.add_argument('--PREV_INTRODUCED_CLS', default=0, type=int)
+    parser.add_argument('--CUR_INTRODUCED_CLS', default=20, type=int)
+    parser.add_argument('--top_unk', default=5, type=int)
+    parser.add_argument('--unmatched_boxes', default=False, action='store_true')
+    parser.add_argument('--featdim', default=1024, type=int)
+    parser.add_argument('--pretrain', default='', help='initialized from the pre-training model')
+    parser.add_argument('--train_set', default='', help='training txt files')
+    parser.add_argument('--test_set', default='', help='testing txt files')
+    parser.add_argument('--NC_branch', default=False, action='store_true')
+    parser.add_argument('--nc_loss_coef', default=2, type=float)
+    parser.add_argument('--invalid_cls_logits', default=False, action='store_true', help='owod setting')
+    parser.add_argument('--nc_epoch', default=0, type=int)
+    parser.add_argument('--num_classes', default=81, type=int)
+    parser.add_argument('--backbone', default='resnet50', type=str, help="Name of the convolutional backbone to use")
+    parser.add_argument('--dataset', default='owod')
+    parser.add_argument('--data_root', default='../data/OWDETR', type=str)
+    parser.add_argument('--bbox_thresh', default=0.3, type=float)
     return parser
-
 
 def main(args):
     utils.init_distributed_mode(args)
@@ -146,12 +151,12 @@ def main(args):
     model.to(device)
 
     model_without_ddp = model
+    print(model_without_ddp)
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
 
-    dataset_train = build_dataset(image_set='train', args=args)
-    dataset_val = build_dataset(image_set='val', args=args)
-
+    dataset_train, dataset_val = get_datasets(args)
+    
     if args.distributed:
         if args.cache_mode:
             sampler_train = samplers.NodeDistributedSampler(dataset_train)
@@ -163,9 +168,7 @@ def main(args):
         sampler_train = torch.utils.data.RandomSampler(dataset_train)
         sampler_val = torch.utils.data.SequentialSampler(dataset_val)
 
-    batch_sampler_train = torch.utils.data.BatchSampler(
-        sampler_train, args.batch_size, drop_last=True)
-
+    batch_sampler_train = torch.utils.data.BatchSampler(sampler_train, args.batch_size, drop_last=True)
     data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
                                    collate_fn=utils.collate_fn, num_workers=args.num_workers,
                                    pin_memory=True)
@@ -181,9 +184,6 @@ def main(args):
                 out = True
                 break
         return out
-
-    for n, p in model_without_ddp.named_parameters():
-        print(n)
 
     param_dicts = [
         {
@@ -213,18 +213,29 @@ def main(args):
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu])
         model_without_ddp = model.module
 
-    if args.dataset_file == "coco_panoptic":
+    if args.dataset == "coco_panoptic":
         # We also evaluate AP during panoptic training, on original coco DS
         coco_val = datasets.coco.build("val", args)
         base_ds = get_coco_api_from_dataset(coco_val)
-    else:
+    elif args.dataset == "coco":
         base_ds = get_coco_api_from_dataset(dataset_val)
+    else:
+        base_ds = dataset_val
 
     if args.frozen_weights is not None:
         checkpoint = torch.load(args.frozen_weights, map_location='cpu')
         model_without_ddp.detr.load_state_dict(checkpoint['model'])
 
     output_dir = Path(args.output_dir)
+
+    if args.pretrain:
+        print('Initialized from the pre-training model')
+        checkpoint = torch.load(args.pretrain, map_location='cpu')
+        state_dict = checkpoint['model']
+        msg = model_without_ddp.load_state_dict(state_dict, strict=False)
+        print(msg)
+        args.start_epoch = checkpoint['epoch'] + 1
+
     if args.resume:
         if args.resume.startswith('https'):
             checkpoint = torch.hub.load_state_dict_from_url(
@@ -255,16 +266,18 @@ def main(args):
             lr_scheduler.step(lr_scheduler.last_epoch)
             args.start_epoch = checkpoint['epoch'] + 1
         # check the resumed model
-        if not args.eval:
+        if (not args.eval and not args.viz and args.dataset in ['coco', 'voc']):
             test_stats, coco_evaluator = evaluate(
-                model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
+                model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir, args
             )
-    
-    if args.eval:
-        test_stats, coco_evaluator = evaluate(model, criterion, postprocessors,
-                                              data_loader_val, base_ds, device, args.output_dir)
-        if args.output_dir:
-            utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
+        if args.eval:
+            test_stats, coco_evaluator = evaluate(model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir, args)
+            if args.output_dir:
+                utils.save_on_master(coco_evaluator.coco_eval["bbox"].eval, output_dir / "eval.pth")
+            return
+
+    if args.viz:
+        viz(model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir)
         return
 
     print("Start training")
@@ -273,7 +286,7 @@ def main(args):
         if args.distributed:
             sampler_train.set_epoch(epoch)
         train_stats = train_one_epoch(
-            model, criterion, data_loader_train, optimizer, device, epoch, args.clip_max_norm)
+            model, criterion, data_loader_train, optimizer, device, epoch, args.nc_epoch, args.clip_max_norm)
         lr_scheduler.step()
         if args.output_dir:
             checkpoint_paths = [output_dir / 'checkpoint.pth']
@@ -289,9 +302,12 @@ def main(args):
                     'args': args,
                 }, checkpoint_path)
 
-        test_stats, coco_evaluator = evaluate(
-            model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
-        )
+        if args.dataset in ['owod'] and epoch % args.eval_every == 0 and epoch > 0:
+            test_stats, coco_evaluator = evaluate(
+                model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir, args
+            )
+        else:
+            test_stats = {}
 
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                      **{f'test_{k}': v for k, v in test_stats.items()},
@@ -302,25 +318,48 @@ def main(args):
             with (output_dir / "log.txt").open("a") as f:
                 f.write(json.dumps(log_stats) + "\n")
 
-            # for evaluation logs
-            if coco_evaluator is not None:
-                (output_dir / 'eval').mkdir(exist_ok=True)
-                if "bbox" in coco_evaluator.coco_eval:
-                    filenames = ['latest.pth']
-                    if epoch % 50 == 0:
-                        filenames.append(f'{epoch:03}.pth')
-                    for name in filenames:
-                        torch.save(coco_evaluator.coco_eval["bbox"].eval,
-                                   output_dir / "eval" / name)
+            if args.dataset in ['owod'] and epoch % args.eval_every == 0 and epoch > 0:
+                # for evaluation logs
+                if coco_evaluator is not None:
+                    (output_dir / 'eval').mkdir(exist_ok=True)
+                    if "bbox" in coco_evaluator.coco_eval:
+                        filenames = ['latest.pth']
+                        if epoch % 50 == 0:
+                            filenames.append(f'{epoch:03}.pth')
+                        for name in filenames:
+                            torch.save(coco_evaluator.coco_eval["bbox"].eval,
+                                    output_dir / "eval" / name)
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
     print('Training time {}'.format(total_time_str))
 
+def get_datasets(args):
+    print(args.dataset)
+    if args.dataset == 'owod':
+        train_set = args.train_set
+        test_set = args.test_set
+        dataset_train = OWDetection(args, args.owod_path, ["2007"], image_sets=[args.train_set], transforms=make_coco_transforms(args.train_set))
+        dataset_val = OWDetection(args, args.owod_path, ["2007"], image_sets=[args.test_set], transforms=make_coco_transforms(args.test_set))
+    else:
+        raise ValueError("Wrong dataset name")
+
+    print(args.dataset)
+    print(args.train_set)
+    print(args.test_set)
+    print(dataset_train)
+    print(dataset_val)
+
+    return dataset_train, dataset_val
+
+
+def set_dataset_path(args):
+    args.owod_path = os.path.join(args.data_root, 'VOC2007')
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('Deformable DETR training and evaluation script', parents=[get_args_parser()])
     args = parser.parse_args()
+    set_dataset_path(args)
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     main(args)

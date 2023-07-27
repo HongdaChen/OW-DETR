@@ -121,8 +121,69 @@ class ConvertCocoPolysToMask(object):
 
         return image, target
 
-
+## added transformations for OWOD data splits
 def make_coco_transforms(image_set):
+
+    normalize = T.Compose([
+        T.ToTensor(),
+        T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
+
+    scales = [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]
+    t=[]
+    
+    if 'train' in image_set:
+        t.append(['train'])
+        t.append(T.Compose([
+            T.RandomHorizontalFlip(),
+            T.RandomSelect(
+                T.RandomResize(scales, max_size=1333),
+                T.Compose([
+                    T.RandomResize([400, 500, 600]),
+                    T.RandomSizeCrop(384, 600),
+                    T.RandomResize(scales, max_size=1333),
+                ])
+            ),
+            normalize,
+        ]))
+        return t
+    
+    if 'ft' in image_set:
+        t.append(['ft'])
+        t.append(T.Compose([
+            T.RandomHorizontalFlip(),
+            T.RandomSelect(
+                T.RandomResize(scales, max_size=1333),
+                T.Compose([
+                    T.RandomResize([400, 500, 600]),
+                    T.RandomSizeCrop(384, 600),
+                    T.RandomResize(scales, max_size=1333),
+                ])
+            ),
+            normalize,
+        ]))
+        return t
+
+    if 'val' in image_set:
+        t.append(['val'])
+        t.append(T.Compose([
+            T.RandomResize([800], max_size=1333),
+            normalize,
+        ]))
+        return t
+
+    if 'test' in image_set:
+        t.append(['test'])
+        t.append(T.Compose([
+            T.RandomResize([800], max_size=1333),
+            normalize,
+        ]))
+        return t
+
+    raise ValueError(f'unknown {image_set}')
+
+## original function
+def make_ori_coco_transforms(image_set):
 
     normalize = T.Compose([
         T.ToTensor(),
@@ -155,6 +216,7 @@ def make_coco_transforms(image_set):
 
 
 def build(image_set, args):
+    # import pdb;pdb.set_trace()
     root = Path(args.coco_path)
     assert root.exists(), f'provided COCO path {root} does not exist'
     mode = 'instances'
@@ -164,6 +226,10 @@ def build(image_set, args):
     }
 
     img_folder, ann_file = PATHS[image_set]
-    dataset = CocoDetection(img_folder, ann_file, transforms=make_coco_transforms(image_set), return_masks=args.masks,
-                            cache_mode=args.cache_mode, local_rank=get_local_rank(), local_size=get_local_size())
+    if 'coco' in str(root):
+        dataset = CocoDetection(img_folder, ann_file, transforms=make_ori_coco_transforms(image_set), return_masks=args.masks,
+                                cache_mode=args.cache_mode, local_rank=get_local_rank(), local_size=get_local_size())
+    else:
+        dataset = CocoDetection(img_folder, ann_file, transforms=make_coco_transforms(image_set), return_masks=args.masks,
+                                cache_mode=args.cache_mode, local_rank=get_local_rank(), local_size=get_local_size())
     return dataset
